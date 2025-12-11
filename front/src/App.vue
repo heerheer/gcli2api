@@ -1,49 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import OAuthTab from './components/OAuthTab.vue'
+import UploadTab from './components/UploadTab.vue'
+import ManageTab from './components/ManageTab.vue'
+import ConfigTab from './components/ConfigTab.vue'
+import LogsTab from './components/LogsTab.vue'
+import AboutTab from './components/AboutTab.vue'
+import type { StatusType, TabName, CredInfo, ConfigForm } from './types'
 
-type StatusType = 'info' | 'success' | 'error'
-type TabName = 'oauth' | 'upload' | 'manage' | 'config' | 'logs' | 'about'
-
-type CredInfo = {
-  filename: string
-  status: {
-    disabled: boolean
-    error_codes?: number[]
-    last_success?: string
-  }
-  user_email?: string
-  cooldown_status?: string | null
-  cooldown_remaining_seconds?: number
-  cooldown_until?: number | null
-  contentText?: string
-  contentLoaded?: boolean
-  contentLoading?: boolean
-  expanded?: boolean
-}
-
-type ConfigForm = {
-  host: string
-  port: number | null
-  configApiPassword: string
-  configPanelPassword: string
-  configPassword: string
-  credentialsDir: string
-  proxy: string
-  codeAssistEndpoint: string
-  oauthProxyUrl: string
-  googleapisProxyUrl: string
-  resourceManagerApiUrl: string
-  serviceUsageApiUrl: string
-  autoBanEnabled: boolean
-  autoBanErrorCodes: string
-  callsPerRotation: number | null
-  retry429Enabled: boolean
-  retry429MaxRetries: number | null
-  retry429Interval: number | null
-  compatibilityModeEnabled: boolean
-  returnThoughtsToFrontend: boolean
-  antiTruncationMaxAttempts: number | null
-}
 
 const statusBanner = reactive<{ message: string; type: StatusType }>({ message: '', type: 'info' })
 const showStatus = (message: string, type: StatusType = 'info') => {
@@ -368,24 +332,13 @@ const handleGetAllProjectsChange = () => {
 // Upload state
 const uploadSelectedFiles = ref<File[]>([])
 const uploadProgress = reactive({ visible: false, percent: 0 })
-const uploadAreaActive = ref(false)
+// 组件内已管理拖拽态，移除全局 uploadAreaActive
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const triggerFileDialog = () => {
   fileInputRef.value?.click()
 }
 
-const handleFileSelect = (event: Event) => {
-  const target = event.target as HTMLInputElement
-  const files = Array.from(target.files || [])
-  addFiles(files)
-  target.value = ''
-}
-
-const onDropFiles = (event: DragEvent) => {
-  const files = Array.from(event.dataTransfer?.files || [])
-  addFiles(files)
-  uploadAreaActive.value = false
-}
+// 组件化后未使用的文件选择/拖拽处理，移除
 
 const addFiles = (files: File[]) => {
   files.forEach((file) => {
@@ -407,11 +360,7 @@ const clearFiles = () => {
   uploadSelectedFiles.value = []
 }
 
-const formatFileSize = (bytes: number) => {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
-  return `${Math.round(bytes / (1024 * 1024))} MB`
-}
+// formatFileSize 已移除（当前未使用）
 
 const uploadFiles = async () => {
   if (uploadSelectedFiles.value.length === 0) {
@@ -492,18 +441,10 @@ const currentPage = ref(1)
 const currentStatusFilter = ref<'all' | 'enabled' | 'disabled'>('all')
 const selectedCredFiles = ref<Set<string>>(new Set())
 
-const statsData = computed(() => {
-  const normal = credsList.value.filter((c) => !c.status.disabled).length
-  const disabled = credsList.value.filter((c) => c.status.disabled).length
-  return { total: totalCredsCount.value, normal, disabled }
-})
+// statsData 已移除（当前未使用）
 
 const totalPages = computed(() => Math.max(1, Math.ceil(totalCredsCount.value / pageSize.value)))
-const paginationText = computed(() => {
-  const startItem = (currentPage.value - 1) * pageSize.value + 1
-  const endItem = Math.min(currentPage.value * pageSize.value, totalCredsCount.value)
-  return `第 ${currentPage.value} 页，共 ${totalPages.value} 页 (显示 ${startItem}-${endItem}，共 ${totalCredsCount.value} 项)`
-})
+// paginationText 已移除（当前未使用）
 
 const refreshCredsStatus = async () => {
   credsLoading.value = true
@@ -663,10 +604,7 @@ const downloadAllCreds = async () => {
   }
 }
 
-const deleteCred = async (filename: string) => {
-  if (!confirm(`确定要删除凭证文件吗？\n${filename}`)) return
-  await credAction(filename, 'delete')
-}
+// deleteCred 已移除（由 ManageTab 直接触发 action）
 
 const toggleFileSelection = (filename: string) => {
   const set = new Set(selectedCredFiles.value)
@@ -761,15 +699,7 @@ const refreshAllEmails = async () => {
   }
 }
 
-const formatCooldown = (remainingSeconds?: number) => {
-  if (!remainingSeconds) return ''
-  const hours = Math.floor(remainingSeconds / 3600)
-  const minutes = Math.floor((remainingSeconds % 3600) / 60)
-  const seconds = remainingSeconds % 60
-  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`
-  if (minutes > 0) return `${minutes}m ${seconds}s`
-  return `${seconds}s`
-}
+// formatCooldown 已移除（当前未在模板使用）
 
 let cooldownTimer: number | null = null
 const startCooldownTimer = () => {
@@ -1128,6 +1058,12 @@ onBeforeUnmount(() => {
   stopCooldownTimer()
   disconnectWebSocket()
 })
+
+// Tab 辅助方法，避免模板中的类型比较告警
+const setActiveTab = (tab: TabName) => {
+  activeTab.value = tab
+}
+const isActiveTab = (tab: TabName) => activeTab.value === tab
 </script>
 
 <template>
@@ -1153,527 +1089,100 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="tabs">
-          <button class="tab" :class="{ active: activeTab === 'oauth' }" @click="activeTab = 'oauth'">OAuth认证</button>
-          <button class="tab" :class="{ active: activeTab === 'upload' }" @click="activeTab = 'upload'">批量上传</button>
-          <button class="tab" :class="{ active: activeTab === 'manage' }" @click="activeTab = 'manage'">文件管理</button>
-          <button class="tab" :class="{ active: activeTab === 'config' }" @click="activeTab = 'config'">配置管理</button>
-          <button class="tab" :class="{ active: activeTab === 'logs' }" @click="activeTab = 'logs'">实时日志</button>
-          <button class="tab" :class="{ active: activeTab === 'about' }" @click="activeTab = 'about'">项目信息</button>
+          <button class="tab" :class="{ active: isActiveTab('oauth') }" @click="setActiveTab('oauth')">OAuth</button>
+          <button class="tab" :class="{ active: isActiveTab('upload') }" @click="setActiveTab('upload')">上传</button>
+          <button class="tab" :class="{ active: isActiveTab('manage') }" @click="setActiveTab('manage')">管理</button>
+          <button class="tab" :class="{ active: isActiveTab('config') }" @click="setActiveTab('config')">配置</button>
+          <button class="tab" :class="{ active: isActiveTab('logs') }" @click="setActiveTab('logs')">日志</button>
+          <button class="tab" :class="{ active: isActiveTab('about') }" @click="setActiveTab('about')">项目信息</button>
         </div>
 
-        <!-- OAuth Tab -->
-        <section v-show="activeTab === 'oauth'" class="tab-content active">
-          <div class="status success mb-4">
-            <strong>✨ 自动化优化：</strong> 系统现在会在认证成功后自动为您的项目启用必需的API服务
-            <ul class="ml-6 list-disc text-sm text-green-900">
-              <li><strong>Gemini Cloud Assist API</strong></li>
-              <li><strong>Gemini for Google Cloud API</strong></li>
-            </ul>
-            <p class="mt-2 text-green-800 text-sm">无需手动启用API，系统会自动处理这些配置步骤，让认证流程更加顺畅。</p>
-          </div>
+        <OAuthTab
+          v-if="activeTab === 'oauth'"
+          :auth-token="authToken"
+          :project-id="projectId"
+          :get-all-projects-creds="getAllProjectsCreds"
+          :auth-url="authUrl"
+          :auth-url-visible="authUrlVisible"
+          :credentials-content="credentialsContent"
+          :credentials-visible="credentialsVisible"
+          :auth-in-progress="authInProgress"
+          :project-id-open="projectIdOpen"
+          :callback-url-open="callbackUrlOpen"
+          :callback-url="callbackUrl"
+          :current-project-id="currentProjectId"
+          @update:projectId="(v) => (projectId = v)"
+          @update:getAllProjectsCreds="(v) => (getAllProjectsCreds = v)"
+          @toggleProjectIdOpen="toggleProjectIdSection"
+          @toggleCallbackUrlOpen="toggleCallbackUrlSection"
+          @startAuth="startAuth"
+          @getCredentials="getCredentials"
+          @processCallbackUrl="(v) => { callbackUrl = v; processCallbackUrl() }"
+        />
 
-          <div class="form-group">
-            <div class="toggle-row" @click="toggleProjectIdSection">
-              <span class="font-semibold text-gray-700">📁 高级选项：Google Cloud Project ID (不用管，直接点击获取链接即可)</span>
-              <span class="text-gray-500">{{ projectIdOpen ? '▼' : '▶' }}</span>
-            </div>
-            <div v-show="projectIdOpen" class="advanced-box">
-              <label for="projectId" class="font-semibold text-gray-700">Google Cloud Project ID (可选):</label>
-              <input
-                id="projectId"
-                v-model="projectId"
-                type="text"
-                class="input"
-                placeholder="留空将尝试自动检测，或手动输入项目ID"
-              />
-              <small class="text-gray-600 text-xs">💡 提示：如果你不懂这是什么，可以留空此字段让系统自动检测项目ID</small>
-            </div>
-          </div>
+        <UploadTab
+          v-if="activeTab === 'upload'"
+          :files="uploadSelectedFiles"
+          :progress-visible="uploadProgress.visible"
+          :progress-percent="uploadProgress.percent"
+          @triggerFileDialog="triggerFileDialog"
+          @addFiles="addFiles"
+          @removeFile="removeFile"
+          @clearFiles="clearFiles"
+          @uploadFiles="uploadFiles"
+        />
 
-          <div class="form-group">
-            <div class="batch-box">
-              <div class="flex items-center gap-3">
-                <input id="getAllProjectsCreds" v-model="getAllProjectsCreds" type="checkbox" class="scale-125" />
-                <label for="getAllProjectsCreds" class="font-semibold text-green-700 cursor-pointer">🌐 为当前账号所有项目获取凭证</label>
-              </div>
-              <div class="text-sm text-green-800 mt-2 leading-relaxed">
-                <strong>说明：</strong>勾选此选项后，系统会自动检测当前Google账号下的所有项目，并发处理为每个项目生成独立的认证文件。
-              </div>
-              <div v-show="getAllProjectsCreds" class="note-box mt-2">✨ <strong>批量并发认证模式已启用</strong> - 认证完成后将并发为所有可访问的项目生成凭证文件</div>
-            </div>
-          </div>
+        <ManageTab
+          v-if="activeTab === 'manage'"
+          :loading="credsLoading"
+          :creds="credsList"
+          :total="totalCredsCount"
+          :page-size="pageSize"
+          :current-page="currentPage"
+          :status-filter="currentStatusFilter"
+          :selected="selectedCredFiles"
+          @refresh="refreshCredsStatus"
+          @changePage="changePage"
+          @changePageSize="(size) => { pageSize = size; changePageSize() }"
+          @applyStatusFilter="(v) => { currentStatusFilter = v; applyStatusFilter() }"
+          @toggleDetails="toggleCredDetails"
+          @action="credAction"
+          @download="downloadCred"
+          @downloadAll="downloadAllCreds"
+          @toggleFile="toggleFileSelection"
+          @toggleAll="toggleSelectAll"
+          @batch="batchAction"
+          @fetchEmail="fetchUserEmail"
+          @refreshAllEmails="refreshAllEmails"
+        />
 
-          <button class="btn" @click="startAuth">获取认证链接</button>
+        <ConfigTab
+          v-if="activeTab === 'config'"
+          :loading="configLoading"
+          :form="configForm"
+          :env-locked="envLockedFields"
+          @save="saveConfig"
+          @useMirror="useMirrorUrls"
+          @useOfficial="restoreOfficialUrls"
+        />
 
-          <div v-show="authUrlVisible" class="mt-4">
-            <h3 class="font-semibold">认证链接：</h3>
-            <div class="auth-url">
-              <a :href="authUrl" target="_blank" class="break-all text-blue-600 hover:underline">{{ authUrl }}</a>
-            </div>
-            <div class="status info">
-              <strong>重要说明：</strong>
-              <ol class="list-decimal ml-5 text-sm text-blue-900">
-                <li>点击上方认证链接，会在新窗口中打开Google OAuth页面</li>
-                <li>完成Google账号登录和授权</li>
-                <li>授权成功后会跳转到localhost:8080显示成功页面</li>
-                <li>关闭OAuth窗口，返回本页面</li>
-                <li>点击下方"获取认证文件"按钮完成流程</li>
-              </ol>
-            </div>
+        <LogsTab
+          v-if="activeTab === 'logs'"
+          :connection-text="logConnectionStatus.text"
+          :connection-type="logConnectionStatus.type"
+          :logs="filteredLogs"
+          :filter="currentLogFilter"
+          :auto-scroll="autoScroll"
+          @connect="connectWebSocket"
+          @disconnect="disconnectWebSocket"
+          @clearDisplay="clearLogsDisplay"
+          @download="downloadLogs"
+          @clear="clearLogs"
+          @update:filter="(v) => (currentLogFilter = v)"
+          @update:autoScroll="(v) => (autoScroll = v)"
+        />
 
-            <div class="shortcut-box">
-              <div class="flex items-center justify-between cursor-pointer" @click="toggleCallbackUrlSection">
-                <span class="font-semibold text-blue-700">🚀 无法回源？试试快捷方式</span>
-                <span class="text-gray-500">{{ callbackUrlOpen ? '▲' : '▼' }}</span>
-              </div>
-              <div v-show="callbackUrlOpen" class="space-y-3 text-sm text-gray-700">
-                <div class="alert-yellow">
-                  <div class="font-semibold text-yellow-800 mb-1">📚 适用场景：</div>
-                  <ul class="list-disc ml-4 text-yellow-800">
-                    <li>云服务器、VPS等非本地环境</li>
-                    <li>防火墙阻止了8080端口访问</li>
-                    <li>网络环境无法正常回源到localhost</li>
-                    <li>Docker容器内运行，端口映射问题</li>
-                  </ul>
-                </div>
-                <div class="text-gray-700 leading-relaxed">
-                  <strong class="text-blue-700">🔍 什么是回调URL？</strong>
-                  <br />完成Google OAuth授权后，浏览器地址栏显示的完整URL。
-                </div>
-                <input
-                  v-model="callbackUrl"
-                  type="url"
-                  class="input"
-                  placeholder="粘贴完整的回调URL，例如：http://localhost:8080/?state=xxx&code=xxx&scope=xxx..."
-                />
-                <button class="btn success" @click="processCallbackUrl">从回调URL获取凭证</button>
-              </div>
-            </div>
-
-            <button class="btn" @click="getCredentials">获取认证文件</button>
-          </div>
-
-          <div v-show="credentialsVisible" class="mt-4">
-            <h3 class="font-semibold">认证文件内容：</h3>
-            <div class="credentials whitespace-pre-wrap text-xs">{{ credentialsContent }}</div>
-          </div>
-        </section>
-
-        <!-- Upload Tab -->
-        <section v-show="activeTab === 'upload'" class="tab-content active">
-          <h3 class="text-lg font-semibold">批量上传认证文件</h3>
-          <p class="text-gray-600">支持上传多个JSON格式的认证文件到服务器</p>
-
-          <div
-            class="upload-area"
-            :class="{ dragover: uploadAreaActive }"
-            @click="triggerFileDialog"
-            @dragover.prevent="uploadAreaActive = true"
-            @dragleave.prevent="uploadAreaActive = false"
-            @drop.prevent="onDropFiles"
-          >
-            <p>点击选择文件或拖拽文件到此区域</p>
-            <p class="text-sm text-gray-600">支持 .json 和 .zip 格式文件</p>
-            <p class="text-xs text-gray-500">ZIP文件会自动解压提取其中的JSON凭证</p>
-          </div>
-
-          <input ref="fileInputRef" type="file" class="hidden" multiple accept=".json,.zip" @change="handleFileSelect" />
-
-          <div v-show="uploadSelectedFiles.length" class="mt-4 space-y-2">
-            <h4 class="font-semibold">选择的文件：</h4>
-            <div class="file-list">
-              <div v-for="(file, index) in uploadSelectedFiles" :key="file.name + index" class="file-item">
-                <div>
-                  <span class="file-name">{{ file.name }}</span>
-                  <span class="file-size">({{ formatFileSize(file.size) }})</span>
-                </div>
-                <button class="remove-btn" @click="removeFile(index)">删除</button>
-              </div>
-            </div>
-            <div class="flex gap-2 flex-wrap">
-              <button class="btn" @click="uploadFiles">上传文件</button>
-              <button class="btn secondary" @click="clearFiles">清空列表</button>
-            </div>
-          </div>
-
-          <div v-show="uploadProgress.visible" class="upload-progress mt-4">
-            <h4 class="font-semibold">上传进度：</h4>
-            <div class="progress-bar">
-              <div class="progress-fill" :style="{ width: `${Math.round(uploadProgress.percent)}%` }"></div>
-            </div>
-            <p>{{ Math.round(uploadProgress.percent) }}%</p>
-          </div>
-        </section>
-
-        <!-- Manage Tab -->
-        <section v-show="activeTab === 'manage'" class="tab-content active">
-          <h3 class="text-lg font-semibold">凭证文件管理</h3>
-          <p class="text-gray-600">管理所有认证文件，查看状态和执行操作</p>
-
-          <div class="stats-container">
-            <div class="stat-item total">
-              <span class="stat-number">{{ statsData.total }}</span>
-              <span class="stat-label">总计</span>
-            </div>
-            <div class="stat-item normal">
-              <span class="stat-number">{{ statsData.normal }}</span>
-              <span class="stat-label">正常</span>
-            </div>
-            <div class="stat-item disabled">
-              <span class="stat-number">{{ statsData.disabled }}</span>
-              <span class="stat-label">禁用</span>
-            </div>
-          </div>
-
-          <div class="manage-actions">
-            <button class="refresh-btn" @click="refreshCredsStatus">刷新状态</button>
-            <button class="download-all-btn" @click="downloadAllCreds">打包下载所有文件</button>
-          </div>
-
-          <div class="batch-controls">
-            <h4 class="font-semibold">批量操作</h4>
-            <div class="batch-actions">
-              <div class="checkbox-container">
-                <input
-                  id="selectAllCheckbox"
-                  type="checkbox"
-                  class="select-all-checkbox"
-                  :checked="selectedCredFiles.size === credsList.length && credsList.length > 0"
-                  @change="toggleSelectAll(($event.target as HTMLInputElement).checked)"
-                />
-                <label for="selectAllCheckbox">全选</label>
-              </div>
-              <span class="selected-count">已选择 {{ selectedCredFiles.size }} 项</span>
-              <button class="batch-btn batch-enable" :disabled="!selectedCredFiles.size" @click="batchAction('enable')">批量启用</button>
-              <button class="batch-btn batch-disable" :disabled="!selectedCredFiles.size" @click="batchAction('disable')">批量禁用</button>
-              <button class="batch-btn batch-delete" :disabled="!selectedCredFiles.size" @click="batchAction('delete')">批量删除</button>
-              <button class="batch-btn batch-email" @click="refreshAllEmails">刷新所有邮箱</button>
-            </div>
-          </div>
-
-          <div class="filter-container">
-            <label for="statusFilter">凭证状态：</label>
-            <select id="statusFilter" v-model="currentStatusFilter" class="filter-select" @change="applyStatusFilter">
-              <option value="all">全部凭证</option>
-              <option value="enabled">仅启用</option>
-              <option value="disabled">仅禁用</option>
-            </select>
-
-            <label for="pageSizeSelect" class="ml-4">每页显示：</label>
-            <select id="pageSizeSelect" v-model.number="pageSize" class="page-size-select" @change="changePageSize">
-              <option :value="20">20</option>
-              <option :value="50">50</option>
-              <option :value="100">100</option>
-            </select>
-          </div>
-
-          <div id="credsListSection">
-            <div v-show="credsLoading" class="loading">正在加载凭证文件...</div>
-            <div v-if="!credsLoading && credsList.length === 0" class="text-center text-gray-600">暂无凭证文件</div>
-
-            <div v-else class="space-y-3">
-              <div v-for="cred in credsList" :key="cred.filename" class="cred-card" :class="{ disabled: cred.status.disabled }">
-                <div class="cred-header">
-                  <div class="flex items-start gap-3">
-                    <input
-                      type="checkbox"
-                      class="file-checkbox"
-                      :checked="selectedCredFiles.has(cred.filename)"
-                      @change="toggleFileSelection(cred.filename)"
-                    />
-                    <div>
-                      <div class="cred-filename">{{ cred.filename }}</div>
-                      <div class="cred-email" :class="cred.user_email ? 'text-gray-600' : 'text-gray-400 italic'">
-                        {{ cred.user_email || '未获取邮箱' }}
-                      </div>
-                    </div>
-                  </div>
-                  <div class="cred-status">
-                    <span class="status-badge" :class="cred.status.disabled ? 'disabled' : 'enabled'">
-                      {{ cred.status.disabled ? '已禁用' : '已启用' }}
-                    </span>
-                    <span v-if="cred.status.error_codes?.length" class="error-codes">错误码: {{ cred.status.error_codes.join(', ') }}</span>
-                    <span v-else class="status-badge" style="background-color: #28a745; color: white;">无错误</span>
-                    <span
-                      v-if="cred.cooldown_status === 'cooling' && cred.cooldown_remaining_seconds"
-                      class="cooldown-badge"
-                      :title="cred.cooldown_until ? `冷却截止时间: ${new Date((cred.cooldown_until || 0) * 1000).toLocaleString('zh-CN')}` : ''"
-                    >
-                      🕐 冷却中: {{ formatCooldown(cred.cooldown_remaining_seconds) }}
-                    </span>
-                  </div>
-                </div>
-
-                <div class="cred-actions">
-                  <button
-                    class="cred-btn"
-                    :class="cred.status.disabled ? 'enable' : 'disable'"
-                    @click="credAction(cred.filename, cred.status.disabled ? 'enable' : 'disable')"
-                  >
-                    {{ cred.status.disabled ? '启用' : '禁用' }}
-                  </button>
-                  <button class="cred-btn view" @click="toggleCredDetails(cred)">{{ cred.expanded ? '收起' : '查看内容' }}</button>
-                  <button class="cred-btn download" @click="downloadCred(cred.filename)">下载</button>
-                  <button class="cred-btn email" @click="fetchUserEmail(cred.filename)">查看账号邮箱</button>
-                  <button class="cred-btn delete" @click="deleteCred(cred.filename)">删除</button>
-                </div>
-
-                <div class="cred-details" :class="{ show: cred.expanded }">
-                  <div class="cred-content">
-                    <template v-if="cred.contentLoading">正在加载文件内容...</template>
-                    <template v-else>{{ cred.contentText || '点击"查看内容"按钮加载文件详情...' }}</template>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div v-show="totalPages > 1" class="pagination-container">
-              <button class="pagination-btn" :disabled="currentPage <= 1" @click="changePage(-1)">上一页</button>
-              <div class="pagination-info">{{ paginationText }}</div>
-              <button class="pagination-btn" :disabled="currentPage >= totalPages" @click="changePage(1)">下一页</button>
-            </div>
-          </div>
-        </section>
-
-        <!-- Config Tab -->
-        <section v-show="activeTab === 'config'" class="tab-content active">
-          <h3 class="text-lg font-semibold">配置管理</h3>
-          <p class="text-gray-600">管理系统配置参数，修改后立即生效</p>
-
-          <div class="manage-actions">
-            <button class="refresh-btn" @click="loadConfig">刷新配置</button>
-            <button class="btn" @click="saveConfig">保存配置</button>
-          </div>
-
-          <div id="configSection">
-            <div v-show="configLoading" class="loading">正在加载配置...</div>
-            <div v-show="!configLoading" id="configForm" class="space-y-4">
-              <div class="config-group">
-                <h4>服务器配置</h4>
-                <div class="form-group">
-                  <label for="host">服务器主机地址:</label>
-                  <input id="host" v-model="configForm.host" :disabled="isFieldLocked('host')" type="text" class="config-input" />
-                  <small class="config-note">服务器监听的主机地址，0.0.0.0表示监听所有接口</small>
-                </div>
-                <div class="form-group">
-                  <label for="port">服务器端口:</label>
-                  <input id="port" v-model.number="configForm.port" :disabled="isFieldLocked('port')" type="number" min="1" max="65535" class="config-input" />
-                  <small class="config-note">服务器监听的端口号，修改后需要重启服务器</small>
-                </div>
-                <div class="form-group">
-                  <label for="configApiPassword">API访问密码:</label>
-                  <input id="configApiPassword" v-model="configForm.configApiPassword" :disabled="isFieldLocked('api_password')" type="text" class="config-input" />
-                  <small class="config-note">聊天API访问密码，用于OpenAI和Gemini API端点的认证</small>
-                </div>
-                <div class="form-group">
-                  <label for="configPanelPassword">控制面板密码:</label>
-                  <input id="configPanelPassword" v-model="configForm.configPanelPassword" :disabled="isFieldLocked('panel_password')" type="text" class="config-input" />
-                  <small class="config-note">控制面板访问密码，用于web界面登录认证</small>
-                </div>
-                <div class="form-group">
-                  <label for="configPassword">通用密码:</label>
-                  <input id="configPassword" v-model="configForm.configPassword" :disabled="isFieldLocked('password')" type="text" class="config-input" />
-                  <small class="config-note">（兼容性保留）设置后将覆盖上述两个密码，留空则使用分开的密码设置</small>
-                </div>
-              </div>
-
-              <div class="config-group">
-                <h4>基础配置</h4>
-                <div class="form-group">
-                  <label for="credentialsDir">凭证目录路径:</label>
-                  <input id="credentialsDir" v-model="configForm.credentialsDir" :disabled="isFieldLocked('credentials_dir')" type="text" class="config-input" />
-                  <small class="config-note">存储认证文件的目录路径</small>
-                </div>
-                <div class="form-group">
-                  <label for="proxy">代理设置:</label>
-                  <input id="proxy" v-model="configForm.proxy" :disabled="isFieldLocked('proxy')" type="text" class="config-input" placeholder="例如: http://proxy:8080 或 socks5://proxy:1080" />
-                  <small class="config-note">HTTP/HTTPS/SOCKS5Endpoint，留空表示不使用代理</small>
-                </div>
-              </div>
-
-              <div class="config-group">
-                <h4>端点配置</h4>
-                <div class="form-group">
-                  <div class="flex flex-wrap gap-2 mb-3">
-                    <button type="button" class="btn success" @click="useMirrorUrls">🚀 一键使用镜像网址</button>
-                    <button type="button" class="btn info" @click="restoreOfficialUrls">🔄 还原官方端点</button>
-                  </div>
-                  <small class="config-note">镜像网址主要解决墙内无法访问官方端点的问题，部分地区可能无法使用</small>
-                </div>
-                <div class="form-group">
-                  <label for="codeAssistEndpoint">Code Assist Endpoint:</label>
-                  <input id="codeAssistEndpoint" v-model="configForm.codeAssistEndpoint" :disabled="isFieldLocked('code_assist_endpoint')" type="text" class="config-input" />
-                </div>
-                <div class="form-group">
-                  <label for="oauthProxyUrl">OAuth Endpoint:</label>
-                  <input id="oauthProxyUrl" v-model="configForm.oauthProxyUrl" :disabled="isFieldLocked('oauth_proxy_url')" type="text" class="config-input" />
-                </div>
-                <div class="form-group">
-                  <label for="googleapisProxyUrl">Google APIs Endpoint:</label>
-                  <input id="googleapisProxyUrl" v-model="configForm.googleapisProxyUrl" :disabled="isFieldLocked('googleapis_proxy_url')" type="text" class="config-input" />
-                </div>
-                <div class="form-group">
-                  <label for="resourceManagerApiUrl">Resource Manager API Endpoint:</label>
-                  <input id="resourceManagerApiUrl" v-model="configForm.resourceManagerApiUrl" :disabled="isFieldLocked('resource_manager_api_url')" type="text" class="config-input" />
-                </div>
-                <div class="form-group">
-                  <label for="serviceUsageApiUrl">Service Usage API Endpoint:</label>
-                  <input id="serviceUsageApiUrl" v-model="configForm.serviceUsageApiUrl" :disabled="isFieldLocked('service_usage_api_url')" type="text" class="config-input" />
-                </div>
-              </div>
-
-              <div class="config-group">
-                <h4>自动封禁配置</h4>
-                <div class="form-group flex items-center gap-2">
-                  <input id="autoBanEnabled" v-model="configForm.autoBanEnabled" type="checkbox" class="config-checkbox" />
-                  <label for="autoBanEnabled">启用自动封禁</label>
-                </div>
-                <small class="config-note">遇到指定错误码时自动禁用凭证</small>
-                <div class="form-group">
-                  <label for="autoBanErrorCodes">自动封禁错误码:</label>
-                  <input id="autoBanErrorCodes" v-model="configForm.autoBanErrorCodes" type="text" class="config-input" placeholder="例如: 400,403" />
-                  <small class="config-note">用逗号分隔的错误码列表</small>
-                </div>
-              </div>
-
-              <div class="config-group">
-                <h4>429重试配置</h4>
-                <div class="form-group flex items-center gap-2">
-                  <input id="retry429Enabled" v-model="configForm.retry429Enabled" type="checkbox" class="config-checkbox" />
-                  <label for="retry429Enabled">启用429重试</label>
-                </div>
-                <small class="config-note">遇到429错误时自动重试</small>
-                <div class="form-group">
-                  <label for="retry429MaxRetries">429重试次数:</label>
-                  <input id="retry429MaxRetries" v-model.number="configForm.retry429MaxRetries" type="number" min="1" max="50" class="config-input" />
-                </div>
-                <div class="form-group">
-                  <label for="retry429Interval">429重试间隔(秒):</label>
-                  <input id="retry429Interval" v-model.number="configForm.retry429Interval" type="number" min="0.01" max="10" step="0.01" class="config-input" />
-                </div>
-              </div>
-
-              <div class="config-group">
-                <h4>兼容性配置</h4>
-                <div class="form-group flex items-center gap-2">
-                  <input id="compatibilityModeEnabled" v-model="configForm.compatibilityModeEnabled" type="checkbox" class="config-checkbox" />
-                  <label for="compatibilityModeEnabled">启用兼容性模式</label>
-                </div>
-                <div class="config-info warning">启用后所有system消息转换成user，停用system_instructions。</div>
-                <div class="form-group flex items-center gap-2">
-                  <input id="returnThoughtsToFrontend" v-model="configForm.returnThoughtsToFrontend" type="checkbox" class="config-checkbox" />
-                  <label for="returnThoughtsToFrontend">返回思维链到前端</label>
-                </div>
-                <div class="config-info info">启用后可以看到模型的思考过程；禁用后仅显示最终回答。</div>
-              </div>
-
-              <div class="config-group">
-                <h4>抗截断配置</h4>
-                <div class="form-group">
-                  <label for="antiTruncationMaxAttempts">抗截断最大重试次数:</label>
-                  <input id="antiTruncationMaxAttempts" v-model.number="configForm.antiTruncationMaxAttempts" type="number" min="1" max="10" class="config-input" />
-                  <small class="config-note">当检测到输出截断时的最大续传尝试次数</small>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- Logs Tab -->
-        <section v-show="activeTab === 'logs'" class="tab-content active">
-          <h3 class="text-lg font-semibold">实时日志</h3>
-          <p class="text-gray-600">查看系统实时日志输出，支持日志筛选和自动滚动</p>
-
-          <div class="manage-actions flex-wrap">
-            <button class="refresh-btn" @click="connectWebSocket">连接日志流</button>
-            <button class="btn danger" @click="disconnectWebSocket">断开连接</button>
-            <button class="btn success" @click="downloadLogs">下载日志</button>
-            <button class="btn secondary" @click="clearLogs">清空日志</button>
-          </div>
-
-          <div class="filter-container flex-wrap items-center">
-            <label for="logLevelFilter">日志级别筛选：</label>
-            <select id="logLevelFilter" v-model="currentLogFilter" class="filter-select">
-              <option value="all">全部</option>
-              <option value="ERROR">错误</option>
-              <option value="WARNING">警告</option>
-              <option value="INFO">信息</option>
-              <option value="DEBUG">调试</option>
-            </select>
-            <label class="flex items-center gap-2">
-              <input v-model="autoScroll" type="checkbox" />
-              自动滚动到底部
-            </label>
-          </div>
-
-          <div class="status" :class="logConnectionStatus.type">
-            <strong>连接状态：</strong> <span>{{ logConnectionStatus.text }}</span>
-          </div>
-
-          <div
-            ref="logContainerRef"
-            class="bg-[#1e1e1e] text-white font-mono text-xs h-[600px] overflow-y-auto border border-[#333] rounded-md p-4 whitespace-pre-wrap break-words"
-          >
-            <div v-if="filteredLogs.length === 0">等待连接日志流...</div>
-            <div v-else>{{ filteredLogs.join('\n') }}</div>
-          </div>
-        </section>
-
-        <!-- About Tab -->
-        <section v-show="activeTab === 'about'" class="tab-content active space-y-4">
-          <h3 class="text-lg font-semibold">项目信息</h3>
-          <p class="text-gray-600">关于GCLI2API项目的详细信息和支持方式</p>
-
-          <div class="info-card primary">
-            <h4>📋 项目简介</h4>
-            <p>GCLI2API是一个将Google Gemini API转换为OpenAI 和GEMINI API格式的代理工具，支持多账户管理、自动轮换、实时日志监控等功能。</p>
-            <p><strong>🔗 项目地址：</strong> <a href="https://github.com/su-kaka/gcli2api" target="_blank" class="text-blue-600 hover:underline">GitHub - su-kaka/gcli2api</a></p>
-            <p class="text-red-600 font-semibold">⚠️ 禁止商业用途和倒卖 - 仅供学习使用</p>
-          </div>
-
-          <div class="info-card info">
-            <h4>✨ 主要功能</h4>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <p><strong>🔄 多账户管理：</strong> 支持批量上传和管理多个Google账户</p>
-                <p><strong>⚡ 自动轮换：</strong> 智能轮换账户，避免单账户限额</p>
-                <p><strong>📊 实时监控：</strong> 使用统计、错误监控、实时日志</p>
-              </div>
-              <div>
-                <p><strong>🛡️ 安全可靠：</strong> OAuth2认证、自动封禁异常账户</p>
-                <p><strong>🎛️ 配置灵活：</strong> 支持热更新配置、代理设置</p>
-                <p><strong>📱 界面友好：</strong> 响应式设计、移动端适配</p>
-              </div>
-            </div>
-          </div>
-
-          <div class="donate-card">
-            <h4>💝 支持项目发展</h4>
-            <p>如果这个项目对您有帮助，欢迎通过币安扫码捐赠支持项目的持续发展！</p>
-            <div class="inline-block bg-white p-4 rounded-xl shadow-md">
-              <img src="/docs/币安.jpg" alt="币安捐赠二维码" class="w-48 h-48 rounded-lg mx-auto" />
-              <p class="text-gray-700 mt-2 font-semibold text-center">扫码币安捐赠</p>
-            </div>
-          </div>
-
-          <div class="info-card info text-center">
-            <h4>💬 交流群</h4>
-            <p>欢迎加入 QQ 群交流讨论！</p>
-            <p class="text-xl font-bold text-blue-600">QQ 群号：937681997</p>
-            <div class="inline-block bg-white p-4 rounded-xl shadow-md mt-3">
-              <img src="/docs/qq群.jpg" alt="QQ群二维码" class="w-48 h-48 rounded-lg mx-auto" />
-              <p class="text-gray-700 mt-2 font-semibold">扫码加入QQ群</p>
-            </div>
-          </div>
-
-          <div class="info-card muted">
-            <h4>📞 联系我们</h4>
-            <p>• 问题反馈：通过GitHub Issues提交问题和建议</p>
-            <p>• 功能请求：在GitHub Discussions中讨论新功能</p>
-            <p>• 代码贡献：欢迎提交Pull Request改进项目</p>
-            <p>• 文档完善：帮助改进项目文档和使用指南</p>
-          </div>
-        </section>
+        <AboutTab v-if="activeTab === 'about'" />
       </div>
 
       <div v-if="statusBanner.message" id="statusSection" class="status mt-4" :class="statusBanner.type">
