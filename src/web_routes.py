@@ -240,9 +240,9 @@ async def serve_control_panel(request: Request):
         is_mobile = is_mobile_user_agent(user_agent)
 
         if is_mobile:
-            html_file_path = "front/control_panel_mobile.html"
+            html_file_path = "front/dist/index.html"
         else:
-            html_file_path = "front/control_panel.html"
+            html_file_path = "front/dist/index.html"
 
         with open(html_file_path, "r", encoding="utf-8") as f:
             html_content = f.read()

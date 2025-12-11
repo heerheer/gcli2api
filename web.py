@@ -106,7 +106,9 @@ app.include_router(web_router, prefix="", tags=["Web Interface"])
 app.mount("/docs", StaticFiles(directory="docs"), name="docs")
 
 # 静态文件路由 - 服务front目录下的文件（HTML、JS、CSS等）
-app.mount("/front", StaticFiles(directory="front"), name="front")
+app.mount("/front", StaticFiles(directory="front/dist"), name="front")
+
+app.mount("/assets", StaticFiles(directory="front/dist/assets"), name="assets")
 
 
 # 保活接口（仅响应 HEAD）
