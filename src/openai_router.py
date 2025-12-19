@@ -33,6 +33,11 @@ from .openai_transfer import (
     gemini_stream_chunk_to_openai,
     openai_request_to_gemini_payload,
 )
+
+from .openai_responses_transfer import (
+    openai_responses_request_to_gemini_payload,
+    convert_gemini_stream_to_responses_sse,
+)
 from .task_manager import create_managed_task
 
 # 创建路由器
@@ -202,7 +207,126 @@ async def chat_completions(
         log.error(f"Response conversion failed: {e}")
         log.error(f"Response object: {response}")
         raise HTTPException(status_code=500, detail="Response conversion failed")
+    
 
+from openai.types.responses import ResponseCreateParams
+from typing import cast
+@router.post("/v1/responses")
+async def responses(
+    request: Request,
+    token: str = Depends(authenticate_bearer),
+):
+    """
+    OpenAI Responses API compatible endpoint
+    """
+
+
+    # 1. 解析请求
+    try:
+        raw_data = await request.json()
+    except Exception as e:
+        log.error(f"Failed to parse JSON request: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    # 2. 转为OpenAI Response对象
+    try:
+        request_data = cast(ResponseCreateParams,raw_data)
+
+    except Exception as e:
+        log.error(f"Request validation failed: {e}")
+        raise HTTPException(status_code=400, detail=f"Request validation error: {str(e)}")
+
+    # 3. 健康检查
+
+    input_data = request_data["input"]
+
+    # 情况 1：input 是字符串
+    if isinstance(input_data, str):
+        if input_data.strip() == "Hi":
+            return JSONResponse(
+                content={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "gcli2api正常工作中"}}
+                    ]
+                }
+            )
+    elif isinstance(input_data, list):
+        input_data = input_data[0]
+        # 情况 2：input 是 ResponseInputParam
+        if hasattr(input_data, "role") and hasattr(input_data, "content"):
+            if input_data["role"] == "user" and input_data["content"] == "Hi":
+                return JSONResponse(
+                    content={
+                        "choices": [
+                            {"message": {"role": "assistant", "content": "gcli2api正常工作中"}}
+                        ]
+                    }
+                )
+    
+    # 限制max_tokens
+    if request_data["max_output_tokens"] is not None and request_data["max_output_tokens"] > 65535:
+        request_data["max_output_tokens"] = 65535
+
+    # 获取凭证管理器
+    from src.credential_manager import get_credential_manager
+
+    cred_mgr = await get_credential_manager()
+
+    # 获取有效凭证
+    credential_result = await cred_mgr.get_valid_credential()
+    if not credential_result:
+        log.error("当前无可用凭证，请去控制台获取")
+        raise HTTPException(status_code=500, detail="当前无可用凭证，请去控制台获取")
+
+    current_file = credential_result
+    log.debug(f"Using credential: {current_file}")
+
+    # 处理模型名称和功能检测
+    model = request_data["model"]
+    use_fake_streaming = is_fake_streaming_model(model)
+    use_anti_truncation = is_anti_truncation_model(model)
+
+    # 获取基础模型名
+    real_model = get_base_model_from_feature_model(model)
+    request_data["model"] = real_model
+
+    # 转换为Gemini API payload格式
+    try:
+        api_payload = await openai_responses_request_to_gemini_payload(request_data)
+    except Exception as e:
+        log.error(f"OpenAI to Gemini conversion failed: {e}")
+        raise HTTPException(status_code=500, detail="Request conversion failed")
+
+    # 发送请求（429重试已在google_api_client中处理）
+    is_streaming = request_data.get("stream", False)
+    log.debug(f"Sending request: streaming={is_streaming}, model={real_model}")
+    response = await send_gemini_request(api_payload, is_streaming, cred_mgr)
+
+    # 如果是流式响应，直接返回
+    if is_streaming:
+        return await convert_gemini_stream_to_responses_sse(response, model)
+    else:
+        raise HTTPException(status_code=500, detail="Response conversion failed")
+    # 转换非流式响应
+    try:
+        if hasattr(response, "body"):
+            response_data = json.loads(
+                response.body.decode() if isinstance(response.body, bytes) else response.body
+            )
+        else:
+            response_data = json.loads(
+                response.content.decode()
+                if isinstance(response.content, bytes)
+                else response.content
+            )
+
+        openai_response = gemini_response_to_openai(response_data, model)
+        return JSONResponse(content=openai_response)
+
+    except Exception as e:
+        log.error(f"Response conversion failed: {e}")
+        log.error(f"Response object: {response}")
+        raise HTTPException(status_code=500, detail="Response conversion failed")
 
 async def fake_stream_response(api_payload: dict, cred_mgr: CredentialManager) -> StreamingResponse:
     """处理假流式响应"""
