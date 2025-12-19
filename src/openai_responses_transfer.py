@@ -196,7 +196,7 @@ async def openai_responses_request_to_gemini_payload(
             generation_config["thinkingConfig"] = {
                 "thinkingBudget" : 0,
             }
-
+    generation_config["thinkingConfig"]["includeThoughts"] = True
     # -------------------------
     # 5. tools
     # -------------------------
@@ -277,6 +277,8 @@ async def convert_gemini_stream_to_responses_sse(
       - response.output_item.added / response.output_item.done
       - response.content_part.added / response.content_part.done
       - response.output_text.delta / response.output_text.done
+      - response.reasoning_summary_part.added / response.reasoning_summary_part.done
+      - response.reasoning_summary_text.delta / response.reasoning_summary_text.done
       - response.function_call_arguments.delta / response.function_call_arguments.done
       - response.completed
       - error
@@ -294,6 +296,13 @@ async def convert_gemini_stream_to_responses_sse(
     msg_item_id: Optional[str] = None
     msg_output_index: Optional[int] = None
     msg_text_buf: List[str] = []
+
+    # Track a single reasoning item for "thought=true" fragments (created lazily)
+    reasoning_item_id: Optional[str] = None
+    reasoning_output_index: Optional[int] = None
+    reasoning_summary_buf: List[str] = []
+    reasoning_summary_index = 0  # we only use one summary part
+    reasoning_done: bool = False  # ensures reasoning done events are emitted once
 
     def _next_seq() -> int:
         nonlocal seq
@@ -362,6 +371,73 @@ async def convert_gemini_stream_to_responses_sse(
 
         return events
 
+    def _ensure_reasoning_started() -> List[bytes]:
+        """
+        Create reasoning output item + first reasoning summary part.
+        For parts with thought=true, we stream into reasoning_summary_* events.
+        """
+        nonlocal reasoning_item_id, reasoning_output_index, next_output_index, reasoning_summary_index, reasoning_done
+
+        if reasoning_item_id is not None:
+            return []
+
+        reasoning_done = False
+        reasoning_item_id = f"item_{uuid.uuid4().hex}"
+        reasoning_output_index = next_output_index
+        next_output_index += 1
+
+        events: List[bytes] = []
+
+        # response.output_item.added (reasoning)
+        events.append(
+            _sse(
+                "response.output_item.added",
+                {
+                    "type": "response.output_item.added",
+                    "sequence_number": _next_seq(),
+                    "output_index": reasoning_output_index,
+                    "item": {
+                        "id": reasoning_item_id,
+                        "type": "reasoning",
+                        "status": "in_progress",
+                    },
+                },
+            )
+        )
+
+        # response.reasoning_summary_part.added
+        events.append(
+            _sse(
+                "response.reasoning_summary_part.added",
+                {
+                    "type": "response.reasoning_summary_part.added",
+                    "sequence_number": _next_seq(),
+                    "output_index": reasoning_output_index,
+                    "item_id": reasoning_item_id,
+                    "summary_index": reasoning_summary_index,
+                    "part": {"type": "summary_text"},
+                },
+            )
+        )
+
+        return events
+
+    def _emit_reasoning_delta(delta: str) -> bytes:
+        """
+        Emit a single reasoning summary delta chunk.
+        """
+        return _sse(
+            "response.reasoning_summary_text.delta",
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "sequence_number": _next_seq(),
+                "output_index": reasoning_output_index,
+                "item_id": reasoning_item_id,
+                "summary_index": reasoning_summary_index,
+                "delta": delta,
+            },
+        )
+
     def _finalize_message_if_any() -> List[bytes]:
         """
         Close out text content + message item with done events.
@@ -371,8 +447,9 @@ async def convert_gemini_stream_to_responses_sse(
 
         final_text = "".join(msg_text_buf)
 
-        # output_text.done
         events: List[bytes] = []
+
+        # output_text.done
         events.append(
             _sse(
                 "response.output_text.done",
@@ -422,18 +499,81 @@ async def convert_gemini_stream_to_responses_sse(
             )
         )
 
-        # store in completed response output in the correct slot
         output_items.append((msg_output_index, msg_item))
+        return events
 
+    def _finalize_reasoning_if_any() -> List[bytes]:
+        """
+        Close out reasoning summary + reasoning item with done events.
+        This function is idempotent via reasoning_done.
+        """
+        nonlocal reasoning_done
+
+        if reasoning_item_id is None or reasoning_output_index is None:
+            return []
+        if reasoning_done:
+            return []
+
+        reasoning_done = True
+        full_text = "".join(reasoning_summary_buf)
+
+        events: List[bytes] = []
+
+        # response.reasoning_summary_text.done
+        events.append(
+            _sse(
+                "response.reasoning_summary_text.done",
+                {
+                    "type": "response.reasoning_summary_text.done",
+                    "sequence_number": _next_seq(),
+                    "output_index": reasoning_output_index,
+                    "item_id": reasoning_item_id,
+                    "summary_index": reasoning_summary_index,
+                    "text": full_text,
+                },
+            )
+        )
+
+        # response.reasoning_summary_part.done
+        events.append(
+            _sse(
+                "response.reasoning_summary_part.done",
+                {
+                    "type": "response.reasoning_summary_part.done",
+                    "sequence_number": _next_seq(),
+                    "output_index": reasoning_output_index,
+                    "item_id": reasoning_item_id,
+                    "summary_index": reasoning_summary_index,
+                    "part": {"type": "summary_text", "text": full_text},
+                },
+            )
+        )
+
+        # response.output_item.done (reasoning)
+        reasoning_item = {
+            "id": reasoning_item_id,
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [{"type": "summary_text", "text": full_text}],
+        }
+        events.append(
+            _sse(
+                "response.output_item.done",
+                {
+                    "type": "response.output_item.done",
+                    "sequence_number": _next_seq(),
+                    "output_index": reasoning_output_index,
+                    "item": reasoning_item,
+                },
+            )
+        )
+
+        output_items.append((reasoning_output_index, reasoning_item))
         return events
 
     def _emit_function_call(fc_name: Optional[str], fc_args_obj: Any) -> List[bytes]:
         """
         Emit a function_call output item + its arguments delta/done + item.done.
-
-        In Responses output array, tool calls are items with:
-          type == "function_call"
-          name, arguments (string), call_id
         """
         nonlocal next_output_index
 
@@ -444,7 +584,6 @@ async def convert_gemini_stream_to_responses_sse(
         call_id = f"call_{uuid.uuid4().hex}"
         name = fc_name or "unknown_function"
 
-        # arguments must be a string (JSON string)
         try:
             arguments_str = json.dumps(fc_args_obj, separators=(",", ":"), ensure_ascii=False)
         except Exception:
@@ -472,7 +611,7 @@ async def convert_gemini_stream_to_responses_sse(
             )
         )
 
-        # function_call_arguments.delta (we send it in one shot)
+        # function_call_arguments.delta
         events.append(
             _sse(
                 "response.function_call_arguments.delta",
@@ -558,23 +697,27 @@ async def convert_gemini_stream_to_responses_sse(
     async def sse_generator():
         try:
             # response.created
-            created_event = {
-                "type": "response.created",
-                "response": _base_response("in_progress"),
-                "sequence_number": _next_seq(),
-            }
-            yield _sse("response.created", created_event)
+            yield _sse(
+                "response.created",
+                {
+                    "type": "response.created",
+                    "response": _base_response("in_progress"),
+                    "sequence_number": _next_seq(),
+                },
+            )
 
             # response.in_progress (at least once early)
-            inprog_event = {
-                "type": "response.in_progress",
-                "response": _base_response("in_progress"),
-                "sequence_number": _next_seq(),
-            }
-            yield _sse("response.in_progress", inprog_event)
+            yield _sse(
+                "response.in_progress",
+                {
+                    "type": "response.in_progress",
+                    "response": _base_response("in_progress"),
+                    "sequence_number": _next_seq(),
+                },
+            )
 
             async for gemini_chunk in _iter_gemini_sse_json():
-                # optional: emit periodic in_progress (lightweight heartbeat)
+                # lightweight heartbeat
                 yield _sse(
                     "response.in_progress",
                     {
@@ -587,9 +730,26 @@ async def convert_gemini_stream_to_responses_sse(
                 for candidate in gemini_chunk.get("candidates", []) or []:
                     content = candidate.get("content") or {}
                     for part in content.get("parts", []) or []:
-                        # TEXT
-                        if "text" in part and isinstance(part["text"], str) and part["text"]:
-                            # ensure message + content part exists
+                        is_thought = part.get("thought") is True
+                        has_text = isinstance(part.get("text"), str) and bool(part.get("text"))
+
+                        # 1) thought=true -> reasoning summary stream
+                        if is_thought and has_text:
+                            for ev in _ensure_reasoning_started():
+                                yield ev
+
+                            delta = part["text"]
+                            reasoning_summary_buf.append(delta)
+                            yield _emit_reasoning_delta(delta)
+                            continue  # do NOT also send as message text
+
+                        # 2) first non-thought part closes reasoning immediately (if started)
+                        if reasoning_item_id is not None and not reasoning_done:
+                            for ev in _finalize_reasoning_if_any():
+                                yield ev
+
+                        # 3) normal text -> message stream
+                        if has_text:
                             for ev in _ensure_message_started():
                                 yield ev
 
@@ -608,13 +768,17 @@ async def convert_gemini_stream_to_responses_sse(
                                 },
                             )
 
-                        # FUNCTION CALL
+                        # 4) function call
                         if "functionCall" in part and isinstance(part["functionCall"], dict):
                             fc = part["functionCall"]
                             fc_name = fc.get("name")
                             fc_args = fc.get("args", {})
                             for ev in _emit_function_call(fc_name, fc_args):
                                 yield ev
+
+            # finalize reasoning (if any) at end as well (idempotent)
+            for ev in _finalize_reasoning_if_any():
+                yield ev
 
             # finalize text message (if any)
             for ev in _finalize_message_if_any():
@@ -625,18 +789,16 @@ async def convert_gemini_stream_to_responses_sse(
             for _, item in sorted(output_items, key=lambda t: t[0]):
                 completed_output.append(item)
 
-            completed_event = {
-                "type": "response.completed",
-                "response": {
-                    **_base_response("completed"),
-                    "output": completed_output,
+            yield _sse(
+                "response.completed",
+                {
+                    "type": "response.completed",
+                    "response": {**_base_response("completed"), "output": completed_output},
+                    "sequence_number": _next_seq(),
                 },
-                "sequence_number": _next_seq(),
-            }
-            yield _sse("response.completed", completed_event)
+            )
 
         except Exception as e:
-            # log.exception("Responses SSE stream error")
             yield _sse(
                 "error",
                 {
