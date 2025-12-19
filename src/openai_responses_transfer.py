@@ -252,102 +252,401 @@ import logging
 log = logging.getLogger(__name__)
 
 
+
+import json
+import time
+import uuid
+from typing import Any, AsyncIterator, Dict, List, Optional
+
+from fastapi.responses import StreamingResponse
+
+# 你原来有 log.exception，这里假设你已有 logger
+# from your_logger import log
+
+
 async def convert_gemini_stream_to_responses_sse(
     gemini_response,
     model: str,
 ) -> StreamingResponse:
     """
-    Gemini StreamingResponse -> OpenAI Responses API SSE
+    Gemini StreamingResponse -> OpenAI Responses API SSE (best-effort compatible)
+
+    Emits (subset):
+      - response.created
+      - response.in_progress (periodic)
+      - response.output_item.added / response.output_item.done
+      - response.content_part.added / response.content_part.done
+      - response.output_text.delta / response.output_text.done
+      - response.function_call_arguments.delta / response.function_call_arguments.done
+      - response.completed
+      - error
     """
     response_id = f"resp_{uuid.uuid4().hex}"
-    created = int(time.time())
+    created_at = int(time.time())
+
+    seq = 0  # sequence_number must be monotonic increasing
+
+    # Track output items to build response.completed payload
+    output_items: List[Dict[str, Any]] = []
+    next_output_index = 0
+
+    # Track the single assistant message item for streaming text (created lazily)
+    msg_item_id: Optional[str] = None
+    msg_output_index: Optional[int] = None
+    msg_text_buf: List[str] = []
+
+    def _next_seq() -> int:
+        nonlocal seq
+        seq += 1
+        return seq
+
+    def _sse(event_type: str, data_obj: Dict[str, Any]) -> bytes:
+        # SSE line "event:" is optional for some clients but we emit it
+        return (
+            f"event: {event_type}\n"
+            f"data: {json.dumps(data_obj, separators=(',', ':'))}\n\n"
+        ).encode("utf-8")
+
+    def _base_response(status: str) -> Dict[str, Any]:
+        # Keep it minimal but aligned with docs field names
+        return {
+            "id": response_id,
+            "object": "response",
+            "created_at": created_at,
+            "status": status,
+            "error": None,
+            "model": model,
+            "output": [],  # for streaming events we can keep empty; completed will include full
+        }
+
+    def _ensure_message_started() -> List[bytes]:
+        """
+        Create assistant message output item and its first content part.
+        """
+        nonlocal msg_item_id, msg_output_index, next_output_index
+
+        if msg_item_id is not None:
+            return []
+
+        msg_item_id = f"msg_{uuid.uuid4().hex}"
+        msg_output_index = next_output_index
+        next_output_index += 1
+
+        events: List[bytes] = []
+
+        # response.output_item.added (message)
+        item_added = {
+            "type": "response.output_item.added",
+            "output_index": msg_output_index,
+            "item": {
+                "id": msg_item_id,
+                "status": "in_progress",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+            },
+            "sequence_number": _next_seq(),
+        }
+        events.append(_sse("response.output_item.added", item_added))
+
+        # response.content_part.added (output_text part)
+        part_added = {
+            "type": "response.content_part.added",
+            "item_id": msg_item_id,
+            "output_index": msg_output_index,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "", "annotations": []},
+            "sequence_number": _next_seq(),
+        }
+        events.append(_sse("response.content_part.added", part_added))
+
+        return events
+
+    def _finalize_message_if_any() -> List[bytes]:
+        """
+        Close out text content + message item with done events.
+        """
+        if msg_item_id is None or msg_output_index is None:
+            return []
+
+        final_text = "".join(msg_text_buf)
+
+        # output_text.done
+        events: List[bytes] = []
+        events.append(
+            _sse(
+                "response.output_text.done",
+                {
+                    "type": "response.output_text.done",
+                    "item_id": msg_item_id,
+                    "output_index": msg_output_index,
+                    "content_index": 0,
+                    "text": final_text,
+                    "sequence_number": _next_seq(),
+                },
+            )
+        )
+
+        # content_part.done
+        events.append(
+            _sse(
+                "response.content_part.done",
+                {
+                    "type": "response.content_part.done",
+                    "item_id": msg_item_id,
+                    "output_index": msg_output_index,
+                    "content_index": 0,
+                    "part": {"type": "output_text", "text": final_text, "annotations": []},
+                    "sequence_number": _next_seq(),
+                },
+            )
+        )
+
+        # output_item.done (message)
+        msg_item = {
+            "id": msg_item_id,
+            "status": "completed",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": final_text, "annotations": []}],
+        }
+        events.append(
+            _sse(
+                "response.output_item.done",
+                {
+                    "type": "response.output_item.done",
+                    "output_index": msg_output_index,
+                    "item": msg_item,
+                    "sequence_number": _next_seq(),
+                },
+            )
+        )
+
+        # store in completed response output in the correct slot
+        output_items.append((msg_output_index, msg_item))
+
+        return events
+
+    def _emit_function_call(fc_name: Optional[str], fc_args_obj: Any) -> List[bytes]:
+        """
+        Emit a function_call output item + its arguments delta/done + item.done.
+
+        In Responses output array, tool calls are items with:
+          type == "function_call"
+          name, arguments (string), call_id
+        """
+        nonlocal next_output_index
+
+        output_index = next_output_index
+        next_output_index += 1
+
+        item_id = f"fc_{uuid.uuid4().hex}"
+        call_id = f"call_{uuid.uuid4().hex}"
+        name = fc_name or "unknown_function"
+
+        # arguments must be a string (JSON string)
+        try:
+            arguments_str = json.dumps(fc_args_obj, separators=(",", ":"), ensure_ascii=False)
+        except Exception:
+            arguments_str = json.dumps({"_raw": str(fc_args_obj)}, separators=(",", ":"), ensure_ascii=False)
+
+        events: List[bytes] = []
+
+        # output_item.added (function_call)
+        events.append(
+            _sse(
+                "response.output_item.added",
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": {
+                        "id": item_id,
+                        "status": "in_progress",
+                        "type": "function_call",
+                        "name": name,
+                        "arguments": "",
+                        "call_id": call_id,
+                    },
+                    "sequence_number": _next_seq(),
+                },
+            )
+        )
+
+        # function_call_arguments.delta (we send it in one shot)
+        events.append(
+            _sse(
+                "response.function_call_arguments.delta",
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "delta": arguments_str,
+                    "sequence_number": _next_seq(),
+                },
+            )
+        )
+
+        # function_call_arguments.done
+        events.append(
+            _sse(
+                "response.function_call_arguments.done",
+                {
+                    "type": "response.function_call_arguments.done",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "name": name,
+                    "arguments": arguments_str,
+                    "sequence_number": _next_seq(),
+                },
+            )
+        )
+
+        # output_item.done (function_call)
+        fc_item = {
+            "id": item_id,
+            "status": "completed",
+            "type": "function_call",
+            "name": name,
+            "arguments": arguments_str,
+            "call_id": call_id,
+        }
+        events.append(
+            _sse(
+                "response.output_item.done",
+                {
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": fc_item,
+                    "sequence_number": _next_seq(),
+                },
+            )
+        )
+
+        output_items.append((output_index, fc_item))
+        return events
+
+    async def _iter_gemini_sse_json() -> AsyncIterator[Dict[str, Any]]:
+        """
+        Parse upstream SSE lines: expects "data: <json>" chunks.
+        """
+        async for chunk in gemini_response.body_iterator:
+            if not chunk:
+                continue
+
+            if isinstance(chunk, bytes):
+                b = chunk.strip()
+                if not b.startswith(b"data:"):
+                    continue
+                payload = b[len(b"data:") :].strip().decode("utf-8", errors="ignore")
+            else:
+                s = str(chunk).strip()
+                if not s.startswith("data:"):
+                    continue
+                payload = s[len("data:") :].strip()
+
+            if payload == "[DONE]":
+                return
+
+            try:
+                obj = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+
+            if isinstance(obj, dict):
+                yield obj
 
     async def sse_generator():
         try:
             # response.created
-            yield (
-                "event: response.created\n"
-                f"data: {json.dumps({'id': response_id, 'model': model, 'created': created})}\n\n"
-            ).encode()
+            created_event = {
+                "type": "response.created",
+                "response": _base_response("in_progress"),
+                "sequence_number": _next_seq(),
+            }
+            yield _sse("response.created", created_event)
 
-            async for chunk in gemini_response.body_iterator:
-                if not chunk:
-                    continue
+            # response.in_progress (at least once early)
+            inprog_event = {
+                "type": "response.in_progress",
+                "response": _base_response("in_progress"),
+                "sequence_number": _next_seq(),
+            }
+            yield _sse("response.in_progress", inprog_event)
 
-                if isinstance(chunk, bytes):
-                    if not chunk.startswith(b"data: "):
-                        continue
-                    payload = chunk[len(b"data: "):].decode()
-                else:
-                    chunk_str = str(chunk)
-                    if not chunk_str.startswith("data: "):
-                        continue
-                    payload = chunk_str[len("data: "):]
+            async for gemini_chunk in _iter_gemini_sse_json():
+                # optional: emit periodic in_progress (lightweight heartbeat)
+                yield _sse(
+                    "response.in_progress",
+                    {
+                        "type": "response.in_progress",
+                        "response": _base_response("in_progress"),
+                        "sequence_number": _next_seq(),
+                    },
+                )
 
-                try:
-                    gemini_chunk = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
+                for candidate in gemini_chunk.get("candidates", []) or []:
+                    content = candidate.get("content") or {}
+                    for part in content.get("parts", []) or []:
+                        # TEXT
+                        if "text" in part and isinstance(part["text"], str) and part["text"]:
+                            # ensure message + content part exists
+                            for ev in _ensure_message_started():
+                                yield ev
 
-                # === Gemini → Responses 映射 ===
-                for candidate in gemini_chunk.get("candidates", []):
-                    content = candidate.get("content", {})
-                    for part in content.get("parts", []):
+                            delta = part["text"]
+                            msg_text_buf.append(delta)
 
-                        # ---------- TEXT ----------
-                        if "text" in part:
-                            event = {
-                                "type": "response.output_text.delta",
-                                "delta": part["text"],
-                            }
-                            yield (
-                                "event: response.output_text.delta\n"
-                                f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
-                            ).encode()
-
-                        # ---------- TOOL CALL ----------
-                        if "functionCall" in part:
-                            fc = part["functionCall"]
-                            event = {
-                                "type": "response.tool_call.delta",
-                                "tool_call": {
-                                    "name": fc.get("name"),
-                                    "arguments": fc.get("args", {}),
+                            yield _sse(
+                                "response.output_text.delta",
+                                {
+                                    "type": "response.output_text.delta",
+                                    "item_id": msg_item_id,
+                                    "output_index": msg_output_index,
+                                    "content_index": 0,
+                                    "delta": delta,
+                                    "sequence_number": _next_seq(),
                                 },
-                            }
-                            yield (
-                                "event: response.tool_call.delta\n"
-                                f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
-                            ).encode()
+                            )
 
-            # response.completed
+                        # FUNCTION CALL
+                        if "functionCall" in part and isinstance(part["functionCall"], dict):
+                            fc = part["functionCall"]
+                            fc_name = fc.get("name")
+                            fc_args = fc.get("args", {})
+                            for ev in _emit_function_call(fc_name, fc_args):
+                                yield ev
+
+            # finalize text message (if any)
+            for ev in _finalize_message_if_any():
+                yield ev
+
+            # Build completed response.output in correct order
+            completed_output: List[Dict[str, Any]] = []
+            for _, item in sorted(output_items, key=lambda t: t[0]):
+                completed_output.append(item)
+
             completed_event = {
                 "type": "response.completed",
                 "response": {
-                    "id": response_id,
-                    "model": model,
-                    "created": created,
-                    "status": "completed",
+                    **_base_response("completed"),
+                    "output": completed_output,
                 },
+                "sequence_number": _next_seq(),
             }
-            yield (
-                "event: response.completed\n"
-                f"data: {json.dumps(completed_event, separators=(',', ':'))}\n\n"
-            ).encode()
+            yield _sse("response.completed", completed_event)
 
         except Exception as e:
-            log.exception("Responses SSE stream error")
-            error_event = {
-                "type": "response.error",
-                "error": {
-                    "message": str(e),
+            # log.exception("Responses SSE stream error")
+            yield _sse(
+                "error",
+                {
+                    "type": "error",
                     "code": "stream_error",
+                    "message": str(e),
+                    "param": None,
+                    "sequence_number": _next_seq(),
                 },
-            }
-            yield (
-                "event: response.error\n"
-                f"data: {json.dumps(error_event)}\n\n"
-            ).encode()
+            )
 
     return StreamingResponse(
         sse_generator(),
