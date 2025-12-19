@@ -127,20 +127,19 @@ async def openai_responses_request_to_gemini_payload(
             if not isinstance(item, dict):
                 continue
 
-            if item.get("type") == "message":
-                role = item.get("role", "user")
-                if role == "developer":
-                    role = "system"
+            role = item.get("role", "user")
+            if role == "developer": # 对developer兼容
+                role = "system"
 
-                if role == "system":
-                    content = item.get("content")
-                    if isinstance(content, str):
-                        system_instructions.append(content)
-                    continue
+            if role == "system":
+                content = item.get("content")
+                if isinstance(content, str):
+                    system_instructions.append(content)
+                continue
 
-                parts = convert_input_content(item.get("content"))
-                if parts:
-                    contents.append({"role": role, "parts": parts})
+            parts = convert_input_content(item.get("content"))
+            if parts:
+                contents.append({"role": role, "parts": parts})
 
     # Gemini 至少需要一个 user message
     if not contents:
@@ -187,10 +186,16 @@ async def openai_responses_request_to_gemini_payload(
                     "thinkingLevel" : confirm_effort(effort),
                 }
     else:
-        # 不进行思考
-        generation_config["thinkingConfig"] = {
-            "thinkingBudget" : 0,
-        }
+        if "pro" in str(model):
+            # Gemini Pro 系列模型无法禁止思考，就自动吧
+            generation_config["thinkingConfig"] = {
+                "thinkingBudget" : -1,
+            }
+        else:
+            # flash可以不进行思考，设置为0，3系列一样吗...
+            generation_config["thinkingConfig"] = {
+                "thinkingBudget" : 0,
+            }
 
     # -------------------------
     # 5. tools
@@ -247,7 +252,7 @@ import logging
 log = logging.getLogger(__name__)
 
 
-def convert_gemini_stream_to_responses_sse(
+async def convert_gemini_stream_to_responses_sse(
     gemini_response,
     model: str,
 ) -> StreamingResponse:

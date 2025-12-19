@@ -219,8 +219,7 @@ async def responses(
     """
     OpenAI Responses API compatible endpoint
     """
-
-
+    
     # 1. 解析请求
     try:
         raw_data = await request.json()
@@ -264,7 +263,7 @@ async def responses(
                 )
     
     # 限制max_tokens
-    if request_data["max_output_tokens"] is not None and request_data["max_output_tokens"] > 65535:
+    if request_data.get("max_output_tokens") is not None and request_data["max_output_tokens"] > 65535:
         request_data["max_output_tokens"] = 65535
 
     # 获取凭证管理器
@@ -296,6 +295,8 @@ async def responses(
     except Exception as e:
         log.error(f"OpenAI to Gemini conversion failed: {e}")
         raise HTTPException(status_code=500, detail="Request conversion failed")
+
+    log.debug(f"Converted Gemini payload: {api_payload}")
 
     # 发送请求（429重试已在google_api_client中处理）
     is_streaming = request_data.get("stream", False)
